@@ -1,90 +1,89 @@
 import java.io.*;
 import java.net.*;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class ChatServer {
     private static final int PORT = 12345;
-    private static Set<PrintWriter> clientWriters = new HashSet<>();
-    private static Set<String> clientNames = new HashSet<>();
+    private static final Map<String, ClientHandler> clients = new ConcurrentHashMap<>();
 
     public static void main(String[] args) throws IOException {
-        System.out.println("Serwer uruchomiony...");
         ServerSocket serverSocket = new ServerSocket(PORT);
+        System.out.println("Serwer uruchomiony na porcie " + PORT);
 
-        try {
-            while (true) {
-                new ClientHandler(serverSocket.accept()).start();
-            }
-        } finally {
-            serverSocket.close();
+        while (true) {
+            Socket socket = serverSocket.accept();
+            new Thread(new ClientHandler(socket)).start();
         }
     }
 
-    private static class ClientHandler extends Thread {
-        private String username;
+    public static void broadcast(String msg) {
+        for (ClientHandler ch : clients.values()) {
+            ch.send(msg);
+        }
+    }
+
+    public static void broadcastUserList() {
+        StringBuilder sb = new StringBuilder("/users ");
+        for (String u : clients.keySet()) sb.append(u).append(" ");
+        String msg = sb.toString();
+        System.out.println("DEBUG: Wysyłam listę -> " + msg);
+        broadcast(msg);
+    }
+
+    public static void sendPrivate(String from, String to, String msg) {
+        ClientHandler dest = clients.get(to);
+        if (dest != null) {
+            dest.send("/pmfrom " + from + ": " + msg);
+        } else {
+            clients.get(from).send("Użytkownik " + to + " jest offline.");
+        }
+    }
+
+    static class ClientHandler implements Runnable {
         private Socket socket;
         private PrintWriter out;
         private BufferedReader in;
+        private String username;
 
-        public ClientHandler(Socket socket) {
-            this.socket = socket;
-        }
+        ClientHandler(Socket s) { this.socket = s; }
 
         public void run() {
             try {
                 in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
                 out = new PrintWriter(socket.getOutputStream(), true);
 
-                // Rejestracja użytkownika
-                out.println("Witaj w czacie! Podaj swój login:");
                 username = in.readLine();
-                synchronized (clientNames) {
-                    while (clientNames.contains(username)) {
-                        out.println("Login jest zajęty. Podaj inny:");
-                        username = in.readLine();
-                    }
-                    clientNames.add(username);
-                }
-
-                out.println("Witaj, " + username + "! Możesz teraz wysyłać wiadomości.");
-                synchronized (clientWriters) {
-                    clientWriters.add(out);
-                }
-
-                // Powiadomienie innych klientów o nowym użytkowniku
-                for (PrintWriter writer : clientWriters) {
-                    writer.println(username + " dołączył do czatu.");
-                }
-
-                // Obsługa wiadomości od klienta
-                String message;
-                while ((message = in.readLine()) != null) {
-                    if (message.equals("QUIT")) {
-                        break;
-                    }
-                    for (PrintWriter writer : clientWriters) {
-                        writer.println(username + ": " + message);
-                    }
-                }
-            } catch (IOException e) {
-                e.printStackTrace();
-            } finally {
-                try {
+                if (username == null || clients.containsKey(username)) {
+                    out.println("Niepoprawna nazwa użytkownika.");
                     socket.close();
-                } catch (IOException e) {
-                    e.printStackTrace();
+                    return;
                 }
-                synchronized (clientNames) {
-                    clientNames.remove(username);
+
+                clients.put(username, this);
+                broadcast(username + " dołączył do czatu!");
+                broadcastUserList();
+
+                String msg;
+                while ((msg = in.readLine()) != null) {
+                    if (msg.startsWith("/pm ")) {
+                        String[] p = msg.split(" ", 3);
+                        if (p.length == 3) sendPrivate(username, p[1], p[2]);
+                    } else {
+                        broadcast(username + ": " + msg);
+                    }
                 }
-                synchronized (clientWriters) {
-                    clientWriters.remove(out);
+            } catch (IOException ignored) {
+            } finally {
+                if (username != null) {
+                    clients.remove(username);
+                    broadcast(username + " opuścił czat.");
+                    broadcastUserList();
                 }
-                // Powiadomienie o wyjściu z czatu
-                for (PrintWriter writer : clientWriters) {
-                    writer.println(username + " opuścił czat.");
-                }
+                try { socket.close(); } catch (IOException ignored) {}
             }
         }
+
+        void send(String msg) { out.println(msg); }
     }
 }
